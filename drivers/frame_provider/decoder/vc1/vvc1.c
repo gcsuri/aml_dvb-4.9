@@ -41,6 +41,7 @@
 #include <linux/amlogic/media/codec_mm/codec_mm.h>
 #include <linux/amlogic/media/codec_mm/configs.h>
 #include "../utils/firmware.h"
+#include <linux/amlogic/tee.h>
 
 #define DRIVER_NAME "amvdec_vc1"
 #define MODULE_NAME "amvdec_vc1"
@@ -70,12 +71,12 @@
 #define VC1_OFFSET_REG      AV_SCRATCH_C
 #define MEM_OFFSET_REG      AV_SCRATCH_F
 
-#define VF_POOL_SIZE		32
-#define DECODE_BUFFER_NUM_MAX	8
+#define VF_POOL_SIZE		16
+#define DECODE_BUFFER_NUM_MAX	4
 #define WORKSPACE_SIZE		(2 * SZ_1M)
 #define MAX_BMMU_BUFFER_NUM	(DECODE_BUFFER_NUM_MAX + 1)
 #define VF_BUFFER_IDX(n)	(1 + n)
-#define DCAC_BUFF_START_ADDR	0x02e00000
+#define DCAC_BUFF_START_ADDR	0x01f00000
 
 
 #define PUT_INTERVAL        (HZ/100)
@@ -135,6 +136,7 @@ static u32 total_frame;
 static u32 next_pts;
 static u64 next_pts_us64;
 static bool is_reset;
+static struct work_struct set_clk_work;
 
 #ifdef DEBUG_PTS
 static u32 pts_hit, pts_missed, pts_i_hit, pts_i_missed;
@@ -185,8 +187,8 @@ static inline u32 index2canvas(u32 index)
 {
 	const u32 canvas_tab[DECODE_BUFFER_NUM_MAX] = {
 #if 1	/* ALWASY.MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6 */
-		0x010100, 0x030302, 0x050504, 0x070706,
-		0x090908, 0x0b0b0a, 0x0d0d0c, 0x0f0f0e
+	0x010100, 0x030302, 0x050504, 0x070706/*,
+	0x090908, 0x0b0b0a, 0x0d0d0c, 0x0f0f0e*/
 #else
 		0x020100, 0x050403, 0x080706, 0x0b0a09
 #endif
@@ -313,7 +315,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 		}
 
 		repeat_count = READ_VREG(VC1_REPEAT_COUNT);
-		buffer_index = reg & 0x7;
+		buffer_index = ((reg & 0x7) - 1) & 3;
 		picture_type = (reg >> 3) & 7;
 
 		if (buffer_index >= DECODE_BUFFER_NUM_MAX) {
@@ -867,10 +869,10 @@ static int vvc1_prot_init(void)
 	WRITE_VREG(AV_SCRATCH_1, 0x030302);
 	WRITE_VREG(AV_SCRATCH_2, 0x050504);
 	WRITE_VREG(AV_SCRATCH_3, 0x070706);
-	WRITE_VREG(AV_SCRATCH_G, 0x090908);
+/*	WRITE_VREG(AV_SCRATCH_G, 0x090908);
 	WRITE_VREG(AV_SCRATCH_H, 0x0b0b0a);
 	WRITE_VREG(AV_SCRATCH_I, 0x0d0d0c);
-	WRITE_VREG(AV_SCRATCH_J, 0x0f0f0e);
+	WRITE_VREG(AV_SCRATCH_J, 0x0f0f0e);*/
 #else
 	WRITE_VREG(AV_SCRATCH_0, 0x020100);
 	WRITE_VREG(AV_SCRATCH_1, 0x050403);
@@ -974,6 +976,18 @@ static void vvc1_ppmgr_reset(void)
 }
 #endif
 
+static void vvc1_set_clk(struct work_struct *work)
+{
+	if (frame_dur > 0 && saved_resolution !=
+		frame_width * frame_height * (96000 / frame_dur)) {
+		int fps = 96000 / frame_dur;
+
+		saved_resolution = frame_width * frame_height * fps;
+		vdec_source_changed(VFORMAT_VC1,
+			frame_width, frame_height, fps);
+	}
+}
+
 static void vvc1_put_timer_func(unsigned long arg)
 {
 	struct timer_list *timer = (struct timer_list *)arg;
@@ -1006,14 +1020,7 @@ static void vvc1_put_timer_func(unsigned long arg)
 			kfifo_put(&newframe_q, (const struct vframe_s *)vf);
 		}
 	}
-	if (frame_dur > 0 && saved_resolution !=
-		frame_width * frame_height * (96000 / frame_dur)) {
-		int fps = 96000 / frame_dur;
-
-		saved_resolution = frame_width * frame_height * fps;
-		vdec_source_changed(VFORMAT_VC1,
-			frame_width, frame_height, fps);
-	}
+	schedule_work(&set_clk_work);
 	timer->expires = jiffies + PUT_INTERVAL;
 
 	add_timer(timer);
@@ -1023,6 +1030,7 @@ static s32 vvc1_init(void)
 {
 	int ret = -1, size = -1;
 	char *buf = vmalloc(0x1000 * 16);
+	int fw_type = VIDEO_DEC_VC1;
 
 	if (IS_ERR_OR_NULL(buf))
 		return -ENOMEM;
@@ -1048,7 +1056,7 @@ static s32 vvc1_init(void)
 	} else
 		pr_info("not supported VC1 format\n");
 
-	size = get_firmware_data(VIDEO_DEC_VC1, buf);
+	size = get_firmware_data(fw_type, buf);
 	if (size < 0) {
 		amvdec_disable();
 		pr_err("get firmware fail.");
@@ -1141,12 +1149,13 @@ static int amvdec_vc1_probe(struct platform_device *pdev)
 		gvs = NULL;
 		return -ENODEV;
 	}
-
+	INIT_WORK(&set_clk_work, vvc1_set_clk);
 	return 0;
 }
 
 static int amvdec_vc1_remove(struct platform_device *pdev)
 {
+	cancel_work_sync(&set_clk_work);
 	if (stat & STAT_VDEC_RUN) {
 		amvdec_stop();
 		stat &= ~STAT_VDEC_RUN;

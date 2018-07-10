@@ -74,6 +74,7 @@ static DEFINE_MUTEX(vdec_mutex);
 #define CMA_ALLOC_SIZE SZ_64M
 #define MEM_NAME "vdec_prealloc"
 static int inited_vcodec_num;
+#define jiffies_ms div64_u64(get_jiffies_64() * 1000, HZ)
 static int poweron_clock_level;
 static int keep_vdec_mem;
 static unsigned int debug_trace_num = 16 * 20;
@@ -218,7 +219,7 @@ static int get_canvas(unsigned int index, unsigned int base)
 
 int vdec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 {
-	if (vdec->dec_status)
+	if (vdec && vdec->dec_status)
 		return vdec->dec_status(vdec, vstatus);
 
 	return -1;
@@ -235,6 +236,7 @@ int vdec_set_trickmode(struct vdec_s *vdec, unsigned long trickmode)
 		if ((r == 0) && (vdec->slave) && (vdec->slave->set_trickmode))
 			r = vdec->slave->set_trickmode(vdec->slave,
 				trickmode);
+		return r;
 	}
 
 	return -1;
@@ -298,8 +300,7 @@ void  vdec_count_info(struct vdec_info *vs, unsigned int err,
 EXPORT_SYMBOL(vdec_count_info);
 int vdec_is_support_4k(void)
 {
-	//return !is_meson_gxl_package_805X();
-	return 1;
+	return !is_meson_gxl_package_805X();
 }
 EXPORT_SYMBOL(vdec_is_support_4k);
 
@@ -1109,6 +1110,20 @@ bool vdec_need_more_data(struct vdec_s *vdec)
 }
 EXPORT_SYMBOL(vdec_need_more_data);
 
+
+void hevc_wait_ddr(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&vdec_spin_lock, flags);
+	codec_dmcbus_write(DMC_REQ_CTRL,
+		codec_dmcbus_read(DMC_REQ_CTRL) & (~(1 << 4)));
+	spin_unlock_irqrestore(&vdec_spin_lock, flags);
+
+	while (!(codec_dmcbus_read(DMC_CHAN_STS)
+		& (1 << 4)))
+		;
+}
+
 void vdec_save_input_context(struct vdec_s *vdec)
 {
 	struct vdec_input_s *input = &vdec->input;
@@ -1170,6 +1185,8 @@ void vdec_save_input_context(struct vdec_s *vdec)
 			/* pr_info("master->input.last_swap_slave = %d\n",
 				master->input.last_swap_slave); */
 		}
+
+		hevc_wait_ddr();
 	}
 }
 EXPORT_SYMBOL(vdec_save_input_context);
@@ -1432,6 +1449,8 @@ s32 vdec_init(struct vdec_s *vdec, int is_4k)
 
 	p->cma_dev = vdec_core->cma_dev;
 	p->get_canvas = get_canvas;
+	atomic_set(&p->inirq_flag, 0);
+	atomic_set(&p->inirq_thread_flag, 0);
 	/* todo */
 	if (!vdec_dual(vdec))
 		p->use_vfm_path = vdec_stream_based(vdec);
@@ -1653,6 +1672,10 @@ void vdec_release(struct vdec_s *vdec)
 		}
 	}
 
+	while ((atomic_read(&vdec->inirq_flag) > 0)
+		|| (atomic_read(&vdec->inirq_thread_flag) > 0))
+		schedule();
+
 	platform_device_unregister(vdec->dev);
 	vdec_destroy(vdec);
 
@@ -1808,10 +1831,14 @@ static irqreturn_t vdec_isr(int irq, void *dev_id)
 {
 	struct vdec_isr_context_s *c =
 		(struct vdec_isr_context_s *)dev_id;
-	struct vdec_s *vdec = c->vdec;
-
-	if (c->dev_isr)
-		return c->dev_isr(irq, c->dev_id);
+	struct vdec_s *vdec = vdec_core->active_vdec;
+	irqreturn_t ret = IRQ_HANDLED;
+	if (vdec)
+		atomic_set(&vdec->inirq_flag, 1);
+	if (c->dev_isr) {
+		ret = c->dev_isr(irq, c->dev_id);
+		goto isr_done;
+	}
 
 	if ((c != &vdec_core->isr_context[VDEC_IRQ_0]) &&
 	    (c != &vdec_core->isr_context[VDEC_IRQ_1]) &&
@@ -1819,7 +1846,7 @@ static irqreturn_t vdec_isr(int irq, void *dev_id)
 #if 0
 		pr_warn("vdec interrupt w/o a valid receiver\n");
 #endif
-		return IRQ_HANDLED;
+		goto isr_done;
 	}
 
 	if (!vdec) {
@@ -1827,35 +1854,45 @@ static irqreturn_t vdec_isr(int irq, void *dev_id)
 		pr_warn("vdec interrupt w/o an active instance running. core = %p\n",
 			core);
 #endif
-		return IRQ_HANDLED;
+		goto isr_done;
 	}
 
 	if (!vdec->irq_handler) {
 #if 0
 		pr_warn("vdec instance has no irq handle.\n");
 #endif
-		return IRQ_HANDLED;
+		goto  isr_done;
 	}
 
-	return vdec->irq_handler(vdec, c->index);
+	ret = vdec->irq_handler(vdec, c->index);
+isr_done:
+	if (vdec)
+		atomic_set(&vdec->inirq_flag, 0);
+	return ret;
 }
 
 static irqreturn_t vdec_thread_isr(int irq, void *dev_id)
 {
 	struct vdec_isr_context_s *c =
 		(struct vdec_isr_context_s *)dev_id;
-	struct vdec_s *vdec = c->vdec;
-
-	if (c->dev_threaded_isr)
-		return c->dev_threaded_isr(irq, c->dev_id);
-
+	struct vdec_s *vdec = vdec_core->active_vdec;
+	irqreturn_t ret = IRQ_HANDLED;
+	if (vdec)
+		atomic_set(&vdec->inirq_thread_flag, 1);
+	if (c->dev_threaded_isr) {
+		ret = c->dev_threaded_isr(irq, c->dev_id);
+		goto thread_isr_done;
+	}
 	if (!vdec)
-		return IRQ_HANDLED;
+		goto thread_isr_done;
 
 	if (!vdec->threaded_irq_handler)
-		return IRQ_HANDLED;
-
-	return vdec->threaded_irq_handler(vdec, c->index);
+		goto thread_isr_done;
+	ret = vdec->threaded_irq_handler(vdec, c->index);
+thread_isr_done:
+	if (vdec)
+		atomic_set(&vdec->inirq_thread_flag, 0);
+	return ret;
 }
 
 unsigned long vdec_ready_to_run(struct vdec_s *vdec, unsigned long mask)
@@ -2184,7 +2221,7 @@ static int vdec_core_thread(void *data)
 		 * is running, sleep 20ms
 		 */
 		if ((!worker) && (!core->sched_mask)) {
-			msleep(20);
+			usleep_range(1000, 2000);
 			up(&core->sem);
 		}
 
@@ -2253,6 +2290,52 @@ static bool test_hevc(u32 decomp_addr, u32 us_delay)
 
 	return (READ_VREG(HEVCD_IPP_DBG_DATA) & 3) == 1;
 }
+
+void vdec_power_reset(void)
+{
+	/* enable vdec1 isolation */
+	WRITE_AOREG(AO_RTI_GEN_PWR_ISO0,
+		READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0xc0);
+	/* power off vdec1 memories */
+	WRITE_VREG(DOS_MEM_PD_VDEC, 0xffffffffUL);
+	/* vdec1 power off */
+	WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0,
+		READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0xc);
+
+	if (has_vdec2()) {
+		/* enable vdec2 isolation */
+		WRITE_AOREG(AO_RTI_GEN_PWR_ISO0,
+			READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0x300);
+		/* power off vdec2 memories */
+		WRITE_VREG(DOS_MEM_PD_VDEC2, 0xffffffffUL);
+		/* vdec2 power off */
+		WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0,
+			READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0x30);
+	}
+
+	if (has_hdec()) {
+		/* enable hcodec isolation */
+		WRITE_AOREG(AO_RTI_GEN_PWR_ISO0,
+			READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0x30);
+		/* power off hcodec memories */
+		WRITE_VREG(DOS_MEM_PD_HCODEC, 0xffffffffUL);
+		/* hcodec power off */
+		WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0,
+			READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 3);
+	}
+
+	if (has_hevc_vdec()) {
+		/* enable hevc isolation */
+		WRITE_AOREG(AO_RTI_GEN_PWR_ISO0,
+			READ_AOREG(AO_RTI_GEN_PWR_ISO0) | 0xc00);
+		/* power off hevc memories */
+		WRITE_VREG(DOS_MEM_PD_HEVC, 0xffffffffUL);
+		/* hevc power off */
+		WRITE_AOREG(AO_RTI_GEN_PWR_SLEEP0,
+			READ_AOREG(AO_RTI_GEN_PWR_SLEEP0) | 0xc0);
+	}
+}
+EXPORT_SYMBOL(vdec_power_reset);
 
 void vdec_poweron(enum vdec_type_e core)
 {
@@ -3083,7 +3166,8 @@ static ssize_t show_debug(struct class *class,
 	list_for_each_entry(vdec,
 		&core->connected_vdec_list, list) {
 		enum vdec_type_e type;
-
+		if ((vdec->status == VDEC_STATUS_CONNECTED
+			|| vdec->status == VDEC_STATUS_ACTIVE)) {
 		for (type = VDEC_1; type < VDEC_MAX; type++) {
 			if (vdec->core_mask & (1 << type)) {
 				pbuf += sprintf(pbuf, "%s(%d):",
@@ -3103,6 +3187,7 @@ static ssize_t show_debug(struct class *class,
 					/ vdec->total_clk[type]));
 			}
 		}
+	  }
 	}
 
 	vdec_core_unlock(vdec_core, flags);
@@ -3199,9 +3284,6 @@ void vdec_free_irq(enum vdec_irq_num num, void *dev)
 		pr_err("[%s] request irq error, irq num too big!", __func__);
 		return;
 	}
-
-	synchronize_irq(vdec_core->isr_context[num].irq);
-
 	/*
 	 *assume amrisc is stopped already and there is no mailbox interrupt
 	 * when we reset pointers here.
@@ -3209,6 +3291,7 @@ void vdec_free_irq(enum vdec_irq_num num, void *dev)
 	vdec_core->isr_context[num].dev_isr = NULL;
 	vdec_core->isr_context[num].dev_threaded_isr = NULL;
 	vdec_core->isr_context[num].dev_id = NULL;
+	synchronize_irq(vdec_core->isr_context[num].irq);
 }
 EXPORT_SYMBOL(vdec_free_irq);
 

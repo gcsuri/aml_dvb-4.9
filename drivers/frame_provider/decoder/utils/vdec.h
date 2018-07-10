@@ -70,6 +70,7 @@ extern void vdec2_power_mode(int level);
 extern void vdec_poweron(enum vdec_type_e core);
 extern void vdec_poweroff(enum vdec_type_e core);
 extern bool vdec_on(enum vdec_type_e core);
+extern void vdec_power_reset(void);
 
 /*irq num as same as .dts*/
 
@@ -244,6 +245,8 @@ struct vdec_s {
 	u64 run_clk[VDEC_MAX];
 	u64 start_run_clk[VDEC_MAX];
 #endif
+	atomic_t inirq_thread_flag;
+	atomic_t inirq_flag;
 };
 
 /* common decoder vframe provider name to use default vfm path */
@@ -407,6 +410,9 @@ int vdec_wakeup_userdata_poll(struct vdec_s *vdec);
 
 void vdec_reset_userdata_fifo(struct vdec_s *vdec, int bInit);
 
+#ifdef VDEC_DEBUG_SUPPORT
+extern void vdec_set_step_mode(void);
+#endif
 int vdec_get_debug_flags(void);
 
 unsigned char is_mult_inc(unsigned int);

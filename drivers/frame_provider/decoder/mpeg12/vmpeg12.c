@@ -191,6 +191,7 @@ static u32 force_first_i_ready;
 static struct work_struct userdata_push_work;
 static struct work_struct notify_work;
 static struct work_struct reset_work;
+static struct work_struct set_clk_work;
 static bool is_reset;
 
 struct mpeg12_userdata_recored_t {
@@ -1274,6 +1275,19 @@ static void reset_do_work(struct work_struct *work)
 	amvdec_start();
 }
 
+static void vmpeg12_set_clk(struct work_struct *work)
+{
+	if (frame_dur > 0 && saved_resolution !=
+		frame_width * frame_height * (96000 / frame_dur)) {
+		int fps = 96000 / frame_dur;
+
+		saved_resolution = frame_width * frame_height * fps;
+		vdec_source_changed(VFORMAT_MPEG12,
+			frame_width, frame_height, fps);
+	}
+}
+
+
 static void vmpeg_put_timer_func(unsigned long arg)
 {
 	struct timer_list *timer = (struct timer_list *)arg;
@@ -1328,13 +1342,7 @@ static void vmpeg_put_timer_func(unsigned long arg)
 		}
 	}
 
-	if (frame_dur > 0 && saved_resolution !=
-		frame_width * frame_height * (96000 / frame_dur)) {
-		int fps = 96000 / frame_dur;
-		saved_resolution = frame_width * frame_height * fps;
-		vdec_source_changed(VFORMAT_MPEG12,
-			frame_width, frame_height, fps);
-	}
+	schedule_work(&set_clk_work);
 
 	timer->expires = jiffies + PUT_INTERVAL;
 
@@ -2012,6 +2020,7 @@ static int amvdec_mpeg12_probe(struct platform_device *pdev)
 
 	vmpeg12_vdec_info_init();
 
+	INIT_WORK(&set_clk_work, vmpeg12_set_clk);
 	if (vmpeg12_init() < 0) {
 		amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg12 init failed.\n");
 		kfree(gvs);
@@ -2029,6 +2038,7 @@ static int amvdec_mpeg12_probe(struct platform_device *pdev)
 	INIT_WORK(&notify_work, vmpeg12_notify_work);
 	INIT_WORK(&reset_work, reset_do_work);
 
+
 	last_offset = 0xFFFFFFFF;
 #ifdef DUMP_USER_DATA
 	last_wp = 0;
@@ -2045,6 +2055,7 @@ static int amvdec_mpeg12_remove(struct platform_device *pdev)
 	cancel_work_sync(&userdata_push_work);
 	cancel_work_sync(&notify_work);
 	cancel_work_sync(&reset_work);
+	cancel_work_sync(&set_clk_work);
 
 	if (stat & STAT_VDEC_RUN) {
 		amvdec_stop();
@@ -2158,7 +2169,7 @@ module_param(error_frame_skip_level, uint, 0664);
 MODULE_PARM_DESC(error_frame_skip_level,
 				 "\n amvdec_mpeg12 error_frame_skip_level\n");
 module_param(force_first_i_ready, uint, 0664);
-MODULE_PARM_DESC(dec_control, "\n amvmpeg12 force_first_i_ready\n");
+MODULE_PARM_DESC(force_first_i_ready, "\n amvmpeg12 force_first_i_ready\n");
 
 module_init(amvdec_mpeg12_driver_init_module);
 module_exit(amvdec_mpeg12_driver_remove_module);

@@ -80,7 +80,7 @@
 #include "../../frame_provider/decoder/utils/firmware.h"
 #include "../../common/chips/chips.h"
 
-#define G12A_BRINGUP_DEBUG
+//#define G12A_BRINGUP_DEBUG
 
 #define CONFIG_AM_VDEC_REAL //DEBUG_TMP
 
@@ -885,7 +885,7 @@ static int amstream_port_init(struct port_priv_s *priv)
 	}
 
 	/* try to reload the fw.*/
-	r = firmware_reload(FW_LOAD_TRY);
+	r = video_fw_reload(FW_LOAD_TRY);
 	if (r)
 		pr_err("the firmware reload fail.\n");
 
@@ -1090,8 +1090,6 @@ static ssize_t amstream_vbuf_write(struct file *file, const char *buf,
 	struct stream_port_s *port = priv->port;
 	struct stream_buf_s *pbuf = NULL;
 	int r;
-
-
 	if (has_hevc_vdec()) {
 		pbuf = (port->type & PORT_TYPE_HEVC) ? &bufs[BUF_TYPE_HEVC] :
 			&bufs[BUF_TYPE_VIDEO];
@@ -3735,6 +3733,8 @@ static struct mconfig amports_configs[] = {
 	MC_FUN_ID("videobufused", videobufused_show_fun, NULL, 0),
 };
 
+
+
 /*static struct resource memobj;*/
 static int amstream_probe(struct platform_device *pdev)
 {
@@ -3785,7 +3785,7 @@ static int amstream_probe(struct platform_device *pdev)
 		r = (-EIO);
 		goto error3;
 	}
-
+	tsdemux_tsync_func_init();
 	init_waitqueue_head(&amstream_sub_wait);
 	init_waitqueue_head(&amstream_userdata_wait);
 	reset_canuse_buferlevel(10000);
@@ -3795,6 +3795,11 @@ static int amstream_probe(struct platform_device *pdev)
 	/*prealloc fetch buf to avoid no continue buffer later...*/
 	stbuf_fetch_init();
 	REG_PATH_CONFIGS("media.amports", amports_configs);
+
+	/* poweroff the decode core because dos can not be reset when reboot */
+	if (get_cpu_type() == MESON_CPU_MAJOR_ID_G12A)
+		vdec_power_reset();
+
 	return 0;
 
 	/*

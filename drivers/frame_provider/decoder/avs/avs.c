@@ -179,6 +179,7 @@ static struct dec_sysinfo vavs_amstream_dec_info;
 static struct vdec_info *gvs;
 static u32 fr_hint_status;
 static struct work_struct notify_work;
+static struct work_struct set_clk_work;
 static bool is_reset;
 
 static struct vdec_s *vdec;
@@ -558,7 +559,7 @@ static void vavs_isr(void)
 				pr_info("buffer_index %d, canvas addr %x\n",
 					   buffer_index, vf->canvas0Addr);
 			}
-
+			vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
 			vfbuf_use[buffer_index]++;
 			vf->mem_handle =
 				decoder_bmmu_box_get_mem_handle(
@@ -609,7 +610,7 @@ static void vavs_isr(void)
 			vf->canvas0Addr = vf->canvas1Addr =
 				index2canvas(buffer_index);
 			vf->type_original = vf->type;
-			vf->pts_us64 = (pts_valid) ? pts_us64 : 0;
+			vf->pts_us64 = 0;
 			vfbuf_use[buffer_index]++;
 			vf->mem_handle =
 				decoder_bmmu_box_get_mem_handle(
@@ -729,7 +730,6 @@ static int error_recovery_mode;   /*0: blocky  1: mosaic*/
  *static uint error_watchdog_count;
  *static uint error_watchdog_buf_threshold = 0x4000000;
  */
-static uint long_cabac_busy;
 
 static struct vframe_s *vavs_vf_peek(void *op_arg)
 {
@@ -1257,6 +1257,25 @@ static void vavs_notify_work(struct work_struct *work)
 	return;
 }
 
+static void avs_set_clk(struct work_struct *work)
+{
+	if (frame_dur > 0 && saved_resolution !=
+		frame_width * frame_height * (96000 / frame_dur)) {
+		int fps = 96000 / frame_dur;
+
+		saved_resolution = frame_width * frame_height * fps;
+		if (firmware_sel == 0 &&
+			(debug_flag & AVS_DEBUG_USE_FULL_SPEED)) {
+			vdec_source_changed(VFORMAT_AVS,
+				4096, 2048, 60);
+		} else {
+			vdec_source_changed(VFORMAT_AVS,
+			frame_width, frame_height, fps);
+		}
+
+	}
+}
+
 static void vavs_put_timer_func(unsigned long arg)
 {
 	struct timer_list *timer = (struct timer_list *)arg;
@@ -1346,21 +1365,8 @@ static void vavs_put_timer_func(unsigned long arg)
 		}
 
 	}
-	if (frame_dur > 0 && saved_resolution !=
-		frame_width * frame_height * (96000 / frame_dur)) {
-		int fps = 96000 / frame_dur;
 
-		saved_resolution = frame_width * frame_height * fps;
-		if (firmware_sel == 0 &&
-			(debug_flag & AVS_DEBUG_USE_FULL_SPEED)) {
-			vdec_source_changed(VFORMAT_AVS,
-				4096, 2048, 60);
-		} else {
-			vdec_source_changed(VFORMAT_AVS,
-			frame_width, frame_height, fps);
-		}
-
-	}
+	schedule_work(&set_clk_work);
 
 	timer->expires = jiffies + PUT_INTERVAL;
 
@@ -1498,7 +1504,7 @@ static s32 vavs_init(void)
 	vavs_local_init();
 
 	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXM)
-		size = get_firmware_data(VIDEO_DEC_AVS_GXM, buf);
+		size = get_firmware_data(VIDEO_DEC_AVS, buf);
 	else {
 		if (firmware_sel == 1)
 			size = get_firmware_data(VIDEO_DEC_AVS_NOCABAC, buf);
@@ -1521,7 +1527,7 @@ static s32 vavs_init(void)
 		pr_info("tee load ok\n");
 
 	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXM)
-		size = amvdec_loadmc_ex(VFORMAT_AVS, "avs_gxm", buf);
+		size = amvdec_loadmc_ex(VFORMAT_AVS, NULL, buf);
 	else if (firmware_sel == 1)
 		size = amvdec_loadmc_ex(VFORMAT_AVS, "avs_no_cabac", buf);
 	else
@@ -1646,6 +1652,7 @@ static int amvdec_avs_probe(struct platform_device *pdev)
 			user_data_buffer, (u32)user_data_buffer_phys);
 	}
 #endif
+	INIT_WORK(&set_clk_work, avs_set_clk);
 	if (vavs_init() < 0) {
 		pr_info("amvdec_avs init failed.\n");
 		kfree(gvs);
@@ -1661,6 +1668,7 @@ static int amvdec_avs_probe(struct platform_device *pdev)
 	INIT_WORK(&userdata_push_work, userdata_push_do_work);
 #endif
 	INIT_WORK(&notify_work, vavs_notify_work);
+
 	return 0;
 }
 
@@ -1672,6 +1680,7 @@ static int amvdec_avs_remove(struct platform_device *pdev)
 	cancel_work_sync(&userdata_push_work);
 #endif
 	cancel_work_sync(&notify_work);
+	cancel_work_sync(&set_clk_work);
 	if (stat & STAT_VDEC_RUN) {
 		amvdec_stop();
 		stat &= ~STAT_VDEC_RUN;
