@@ -803,7 +803,6 @@ s32 vreal_init(struct vdec_s *vdec)
 
 	ret = rmparser_init(vdec);
 	if (ret) {
-		rmparser_release();
 		amvdec_disable();
 		vfree(buf);
 		pr_info("rm parser init failed\n");

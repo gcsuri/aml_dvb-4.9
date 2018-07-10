@@ -318,7 +318,7 @@ int vdec_source_changed_for_clk_set(int format, int width, int height, int fps)
 	if (clk < 0) {
 		pr_info("can't get valid clk for source ,%d,%d,%d\n",
 			width, height, fps);
-		if (width >= 1920 && height >= 1080 && fps >= 30)
+		if (format >= 1920 && width >= 1080 && fps >= 30)
 			clk = 2;	/*default high clk */
 		else
 			clk = 0;	/*default clk. */

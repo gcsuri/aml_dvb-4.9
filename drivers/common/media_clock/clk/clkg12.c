@@ -710,8 +710,8 @@ static int vdec_clock_set(int clk)
 
 	clock_real_clk[VDEC_1] = clk;
 
-	//pr_debug("vdec mux clock is %lu Hz\n",
-	//	clk_get_rate(gclk.vdec_mux_node->clk));
+	pr_debug("vdec mux clock is %lu Hz\n",
+		clk_get_rate(gclk.vdec_mux_node->clk));
 
 	return clk;
 }
@@ -765,8 +765,8 @@ static int hevc_back_clock_set(int clk)
 	vdec_set_clk(VDEC_HEVCB, clk * MHz);
 
 	clock_real_clk[VDEC_HEVCB] = clk;
-	//pr_debug("hevc back mux clock is %lu Hz\n",
-	//	clk_get_rate(gclk.hevc_back_mux_node->clk));
+	pr_debug("hevc back mux clock is %lu Hz\n",
+		clk_get_rate(gclk.hevc_back_mux_node->clk));
 
 	return clk;
 }
@@ -804,8 +804,8 @@ static int hevc_clock_set(int clk)
 
 	clock_real_clk[VDEC_HEVC] = clk;
 
-	//pr_debug("hevc mux clock is %lu Hz\n",
-	//	clk_get_rate(gclk.hevc_mux_node->clk));
+	pr_debug("hevc mux clock is %lu Hz\n",
+		clk_get_rate(gclk.hevc_mux_node->clk));
 
 	return clk;
 }
@@ -838,8 +838,8 @@ static int hcodec_clock_set(int clk)
 
 	clock_real_clk[VDEC_HCODEC] = clk;
 
-	//pr_debug("hcodec mux clock is %lu Hz\n",
-	//	clk_get_rate(gclk.hcodec_mux_node->clk));
+	pr_debug("hcodec mux clock is %lu Hz\n",
+		clk_get_rate(gclk.hcodec_mux_node->clk));
 
 	return clk;
 }
