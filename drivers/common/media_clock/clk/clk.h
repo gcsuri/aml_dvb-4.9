@@ -42,6 +42,13 @@ void hcodec_clock_off(void);
 void hevc_clock_on(void);
 void hevc_clock_off(void);
 
+int hevc_back_clock_init(void);
+void hevc_back_clock_on(void);
+void hevc_back_clock_off(void);
+int hevc_back_clock_set(int clk);
+void hevc_back_clock_enable(void);
+void hevc_back_clock_hi_enable(void);
+
 int vdec_source_get(enum vdec_type_e core);
 int vdec_clk_get(enum vdec_type_e core);
 
@@ -95,6 +102,13 @@ static struct chip_vdec_clk_s vdec_hevc_clk_mgr __initdata = {
 	.clock_off = hevc_clock_off,
 	.clock_get = vdec_clock_get,
 };
+static struct chip_vdec_clk_s vdec_hevc_back_clk_mgr __initdata = {
+        .clock_init = hevc_back_clock_init,
+        .clock_set = hevc_back_clock_set,
+        .clock_on = hevc_back_clock_on,
+        .clock_off = hevc_back_clock_off,
+        .clock_get = vdec_clock_get,
+};
 #endif
 
 #ifdef VDEC_HAS_VDEC_HCODEC
@@ -116,6 +130,8 @@ static int __init vdec_init_clk(void)
 #endif
 #ifdef VDEC_HAS_HEVC
 	register_vdec_clk_mgr(cpus, VDEC_HEVC, &vdec_hevc_clk_mgr);
+	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_G12A)
+		register_vdec_clk_mgr(cpus, VDEC_HEVCB, &vdec_hevc_back_clk_mgr);
 #endif
 #ifdef VDEC_HAS_VDEC_HCODEC
 	register_vdec_clk_mgr(cpus, VDEC_HCODEC, &vdec_hcodec_clk_mgr);

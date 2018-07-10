@@ -317,8 +317,7 @@ static irqreturn_t vreal_isr(int irq, void *dev_id)
 				WRITE_VREG(TO_AMRISC, ~(1 << buffer_index));
 				WRITE_VREG(FROM_AMRISC, 0);
 				return IRQ_HANDLED;
-			}
-			{
+			} else {
 				current_vdts +=
 					vf->duration - (vf->duration >> 4);
 				vf->pts = current_vdts;
@@ -804,14 +803,18 @@ s32 vreal_init(struct vdec_s *vdec)
 
 	ret = rmparser_init(vdec);
 	if (ret) {
+		rmparser_release();
 		amvdec_disable();
-
+		vfree(buf);
 		pr_info("rm parser init failed\n");
 		return ret;
 	}
 
 	if (vreal_amstream_dec_info.format == VIDEO_DEC_FORMAT_REAL_8) {
 		if (vreal_amstream_dec_info.param == NULL) {
+			rmparser_release();
+			amvdec_disable();
+			vfree(buf);
 			return -1;
 		}
 		load_block_data((void *)pic_sz_tbl, 12);
@@ -833,6 +836,7 @@ s32 vreal_init(struct vdec_s *vdec)
 		pr_info("unsurpported real format\n");
 
 	if (size < 0) {
+		rmparser_release();
 		amvdec_disable();
 		pr_err("get firmware fail.");
 		vfree(buf);
@@ -841,6 +845,7 @@ s32 vreal_init(struct vdec_s *vdec)
 	if (size == 1)
 		pr_info ("tee load ok");
 	else if (amvdec_loadmc_ex(VFORMAT_REAL, NULL, buf) < 0) {
+		rmparser_release();
 		amvdec_disable();
 		vfree(buf);
 		return -EBUSY;
@@ -852,10 +857,14 @@ s32 vreal_init(struct vdec_s *vdec)
 
 	/* enable AMRISC side protocol */
 	ret = vreal_prot_init();
-	if (ret < 0)
+	if (ret < 0) {
+		rmparser_release();
+		amvdec_disable();
 		return ret;
+	}
 	if (vdec_request_irq(VDEC_IRQ_1,  vreal_isr,
 		    "vreal-irq", (void *)vreal_dec_id)) {
+		rmparser_release();
 		amvdec_disable();
 
 		pr_info("vreal irq register error.\n");
